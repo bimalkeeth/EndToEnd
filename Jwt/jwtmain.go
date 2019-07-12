@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/dgrijalva/jwt-go"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
 	"golang.org/x/crypto/bcrypt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 )
 
 var db *sql.DB
@@ -45,7 +47,33 @@ func ProtectedEndpoint(w http.ResponseWriter, r *http.Request) {
 
 func TokenVerifyMiddleWare(next http.HandlerFunc) http.HandlerFunc {
 
-	return nil
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		authHeader := r.Header.Get("Authorization")
+		barerToken := strings.Split(authHeader, " ")
+		if len(barerToken) == 2 {
+			authToken := barerToken[1]
+			token, err := jwt.Parse(authToken, func(token *jwt.Token) (interface{}, error) {
+				if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+
+					return nil, fmt.Errorf("error in token")
+				}
+				return []byte("secret"), nil
+			})
+			if err != nil {
+				errorMessage(w, http.StatusUnauthorized, "error in token")
+				return
+			}
+			if token.Valid {
+				next.ServeHTTP(w, r)
+			} else {
+				errorMessage(w, http.StatusUnauthorized, "token is invalid")
+			}
+		} else {
+			errorMessage(w, http.StatusUnauthorized, "token is invalid")
+		}
+
+	})
 }
 
 func errorMessage(w http.ResponseWriter, status int, message string) {
@@ -55,12 +83,67 @@ func errorMessage(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(errorMessage)
 }
 
-func login(writer http.ResponseWriter, request *http.Request) {
+func GenerateToken(user models.User) (string, error) {
 
-	_, err := writer.Write([]byte("successfully called login"))
+	var err error
+	secret := "secret"
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"email": user.Password,
+		"iss":   "teonyx",
+	})
+	tokenString, err := token.SignedString([]byte(secret))
 	if err != nil {
-		log.Fatal("error occurred in wring response")
+		log.Fatal("error in generating token string")
 	}
+	return tokenString, nil
+
+}
+
+func login(w http.ResponseWriter, r *http.Request) {
+	var user models.User
+	var jwt models.JWT
+
+	err = json.NewDecoder(r.Body).Decode(&user)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if user.Email == "" {
+		errorMessage(w, http.StatusBadRequest, "invalid user")
+		return
+	}
+	if user.Password == "" {
+		errorMessage(w, http.StatusBadRequest, "empty password not accepted")
+		return
+	}
+	password := user.Password
+	row := db.QueryRow("select * from users where email=$1", user.Email)
+	err = row.Scan(&user.ID, &user.Email, &user.Password)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			errorMessage(w, http.StatusNotFound, "user not found")
+			return
+		} else {
+			log.Fatal("error occurred")
+		}
+	}
+	hashPassword := user.Password
+	err = bcrypt.CompareHashAndPassword([]byte(hashPassword), []byte(password))
+	if err != nil {
+		errorMessage(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	token, err := GenerateToken(user)
+	if err != nil {
+		log.Fatal("error in token generation")
+	}
+	w.WriteHeader(http.StatusOK)
+	jwt.Token = token
+
+	fmt.Println(token)
+	_ := json.NewEncoder(w).Encode(jwt)
+
 }
 
 func signup(writer http.ResponseWriter, request *http.Request) {
